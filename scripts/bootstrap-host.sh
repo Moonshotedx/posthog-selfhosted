@@ -102,34 +102,62 @@ log "Preparing $DATA_ROOT"
 mkdir -p "$DATA_ROOT"
 
 if [[ "$NODE_ROLE" == "data" ]] && ! mountpoint -q "$DATA_ROOT"; then
-    log "BM1: setting up NVMe array ($BM1_STORAGE_MODE)"
-    # Detect NVMe devices that are NOT the root disk
-    ROOT_DEV=$(findmnt -no SOURCE / | sed 's/p\?[0-9]*$//')
-    mapfile -t NVMES < <(lsblk -dn -o NAME,TYPE | awk '$2=="disk" && /nvme/ {print "/dev/"$1}' | grep -v "$ROOT_DEV" || true)
+    log "BM1: preparing data NVMe(s)"
 
-    if [[ ${#NVMES[@]} -lt 2 ]]; then
-        echo "expected 2 spare NVMe devices on BM1, found: ${NVMES[*]:-none}" >&2
-        echo "if the OS is on a separate disk, this is fine — otherwise mount $DATA_ROOT yourself and rerun." >&2
+    # Allow user override:  BM1_DATA_DEVICES="/dev/nvme1n1 /dev/nvme2n1"
+    if [[ -n "${BM1_DATA_DEVICES:-}" ]]; then
+        read -r -a NVMES <<< "$BM1_DATA_DEVICES"
+    else
+        # Auto-detect: every NVMe disk that is NOT the root disk and has no
+        # existing partitions/filesystems on it.
+        ROOT_DEV=$(findmnt -no SOURCE / | sed 's/p\?[0-9]*$//')
+        mapfile -t NVMES < <(lsblk -dn -o NAME,TYPE | \
+            awk '$2=="disk" && /nvme/ {print "/dev/"$1}' | \
+            grep -v "^${ROOT_DEV}$" || true)
+    fi
+
+    if [[ ${#NVMES[@]} -eq 0 ]]; then
+        echo "no spare NVMe found. Set BM1_DATA_DEVICES in .env or pre-mount $DATA_ROOT yourself." >&2
         exit 1
     fi
 
-    case "$BM1_STORAGE_MODE" in
-        mirror) RAID_LEVEL=1 ;;
-        stripe) RAID_LEVEL=0 ;;
-        *) echo "invalid BM1_STORAGE_MODE: $BM1_STORAGE_MODE"; exit 1 ;;
-    esac
+    echo "  detected spare NVMe(s): ${NVMES[*]}"
+    echo "  THIS WILL ERASE THEM. Press ENTER to continue, Ctrl-C to abort."
+    read -r
 
-    log "Creating /dev/md0 (raid$RAID_LEVEL) from ${NVMES[*]}"
-    mdadm --create --verbose /dev/md0 --level=$RAID_LEVEL --raid-devices=2 "${NVMES[@]}" --metadata=1.2 --force
-    mdadm --detail --scan >> /etc/mdadm/mdadm.conf
-    update-initramfs -u
+    if [[ ${#NVMES[@]} -eq 1 ]]; then
+        # ── Single-disk path: no RAID, just an XFS filesystem ────────────────
+        DEV="${NVMES[0]}"
+        log "Formatting $DEV as XFS (no RAID — single-disk layout)"
+        echo "  NOTE: there is no on-host drive-failure tolerance. Backups to BM2"
+        echo "        (see scripts/backup.sh) become your sole durability layer."
+        wipefs -af "$DEV"
+        mkfs.xfs -f -L posthog-data "$DEV"
+        UUID=$(blkid -s UUID -o value "$DEV")
+        echo "UUID=$UUID  $DATA_ROOT  xfs  defaults,noatime,nodiratime  0 0" >> /etc/fstab
+    else
+        # ── Multi-disk path: mdadm RAID (mirror by default, stripe optional) ─
+        case "$BM1_STORAGE_MODE" in
+            mirror) RAID_LEVEL=1 ;;
+            stripe) RAID_LEVEL=0 ;;
+            *) echo "invalid BM1_STORAGE_MODE: $BM1_STORAGE_MODE"; exit 1 ;;
+        esac
+        log "Creating /dev/md0 (raid$RAID_LEVEL) from ${NVMES[*]}"
+        for d in "${NVMES[@]}"; do wipefs -af "$d"; done
+        mdadm --create --verbose /dev/md0 \
+            --level="$RAID_LEVEL" --raid-devices="${#NVMES[@]}" \
+            "${NVMES[@]}" --metadata=1.2 --force
+        mdadm --detail --scan >> /etc/mdadm/mdadm.conf
+        update-initramfs -u
+        mkfs.xfs -f -L posthog-data /dev/md0
+        UUID=$(blkid -s UUID -o value /dev/md0)
+        echo "UUID=$UUID  $DATA_ROOT  xfs  defaults,noatime,nodiratime  0 0" >> /etc/fstab
+    fi
 
-    mkfs.xfs -f -L posthog-data /dev/md0
-    UUID=$(blkid -s UUID -o value /dev/md0)
-    echo "UUID=$UUID  $DATA_ROOT  xfs  defaults,noatime,nodiratime  0 0" >> /etc/fstab
     mount "$DATA_ROOT"
+    log "$DATA_ROOT mounted ($(df -h "$DATA_ROOT" | awk 'NR==2 {print $2}') available)"
 elif [[ "$NODE_ROLE" == "app" ]] && ! mountpoint -q "$DATA_ROOT"; then
-    log "BM2: $DATA_ROOT is on the OS disk (single NVMe)"
+    log "BM2: $DATA_ROOT is on the OS disk (single NVMe) — no separate volume needed"
 fi
 
 # ── 4. Per-service directories ───────────────────────────────────────────────

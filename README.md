@@ -85,7 +85,17 @@ Headroom on both nodes covers OS, page cache (critical for ClickHouse/Postgres),
 
 ## 3. Storage Layout
 
-### BM1 — `/opt/posthog/data` (RAID-1 mdadm mirror across `nvme0n1` + `nvme1n1`)
+### BM1 — `/opt/posthog/data`
+
+The script auto-detects spare NVMes (anything that isn't the root disk) and picks one of two paths:
+
+| Layout on BM1 | What `bootstrap-host.sh` does | Capacity | Drive-failure tolerance |
+|---|---|---|---|
+| OS on `nvme0n1`, data on `nvme1n1` *(typical — this is what we have)* | XFS directly on `nvme1n1`, mounted at `/opt/posthog/data` | ~500 GB | **None** — backups to BM2 are the only durability layer |
+| OS on a separate boot SSD, `nvme0n1` + `nvme1n1` both free | mdadm RAID-1 mirror, XFS on `/dev/md0` | ~500 GB | Yes (single-disk failure survives) |
+| OS on a separate boot SSD, 2 NVMes, capacity > redundancy | Set `BM1_STORAGE_MODE=stripe` in `.env` | ~1 TB | None |
+
+Override the auto-detection by setting `BM1_DATA_DEVICES="/dev/nvme1n1"` in `.env`.
 
 ```
 /opt/posthog/data/
@@ -96,7 +106,7 @@ Headroom on both nodes covers OS, page cache (critical for ClickHouse/Postgres),
 └── plugin-server/     # tiny, ephemeral cache
 ```
 
-A mirror gives **drive-failure tolerance** at the cost of half the capacity (500 GB usable). For most teams this is the right trade-off because ClickHouse data is expensive to re-ingest. The mirror is created in `scripts/bootstrap-host.sh`. If you would rather trade redundancy for capacity (1 TB usable, no protection), edit that script and set `BM1_STORAGE_MODE=stripe`.
+> ⚠ With OS-on-nvme0n1 + data-on-nvme1n1, **a single disk failure on `nvme1n1` means full restore from BM2 backups.** Make sure `scripts/backup.sh` is in cron and tested before you put real traffic on the box.
 
 ### BM2 — `/opt/posthog/data` (single NVMe, ext4)
 
