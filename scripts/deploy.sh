@@ -34,6 +34,16 @@ ok()    { printf "${c_grn}✓${c_off} %s\n" "$*"; }
 warn()  { printf "${c_yel}!${c_off} %s\n" "$*"; }
 err()   { printf "${c_red}✗${c_off} %s\n" "$*" >&2; }
 
+# Content-hash each config file. Swarm configs are immutable, so the only
+# way to update them is to create a new one — we use the hash as the suffix
+# so identical content → identical name → no-op redeploy.
+hashf() { sha256sum "$1" | cut -c1-12; }
+export CADDY_CONFIG_VERSION=$(hashf config/caddy/Caddyfile)
+export CLICKHOUSE_CONFIG_VERSION=$(hashf config/clickhouse/config.d/posthog.xml)
+export CLICKHOUSE_USERS_VERSION=$(hashf config/clickhouse/users.d/posthog.xml)
+log "Config versions:"
+echo "    caddyfile=$CADDY_CONFIG_VERSION  clickhouse_config=$CLICKHOUSE_CONFIG_VERSION  clickhouse_users=$CLICKHOUSE_USERS_VERSION"
+
 # One-shot services that exit 0 after completing their job. The convergence
 # loop must NOT block on these — they live in 0/1 replicas once "Complete".
 ONESHOTS=( migrate objectstorage-init )
@@ -189,6 +199,17 @@ done
 
 echo
 docker stack services "$STACK_NAME"
+
+# Cleanup orphaned configs (older versions that no service references).
+# Safe: `docker config rm` refuses to remove a config that's still in use.
+echo
+log "Cleaning up orphaned config versions"
+for cfg in $(docker config ls --format '{{.Name}}' | grep "^posthog_\(caddyfile\|clickhouse_\(config\|users\)\)_"); do
+    if docker config rm "$cfg" >/dev/null 2>&1; then
+        echo "    removed orphan: $cfg"
+    fi
+done
+
 echo
 log "Next steps:"
 echo "    docker service logs -f ${STACK_NAME}_web"

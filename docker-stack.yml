@@ -387,9 +387,15 @@ networks:
       encrypted: "true"
 
 configs:
+  # Swarm configs are immutable once created — to push a content change we
+  # MUST give it a new name. deploy.sh computes a sha of each config file
+  # and exports it as ${*_VERSION}; identical content → identical name → no-op.
   caddyfile:
+    name: posthog_caddyfile_${CADDY_CONFIG_VERSION:-default}
     file: ./config/caddy/Caddyfile
   clickhouse_config:
+    name: posthog_clickhouse_config_${CLICKHOUSE_CONFIG_VERSION:-default}
     file: ./config/clickhouse/config.d/posthog.xml
   clickhouse_users:
+    name: posthog_clickhouse_users_${CLICKHOUSE_USERS_VERSION:-default}
     file: ./config/clickhouse/users.d/posthog.xml
