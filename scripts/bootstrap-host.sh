@@ -201,8 +201,13 @@ for proto_port in tcp/2377 tcp/7946 udp/7946 udp/4789; do
 done
 
 if [[ "$NODE_ROLE" == "app" ]]; then
-    ufw allow 80/tcp  comment 'http'
-    ufw allow 443/tcp comment 'https'
+    # Cloudflare tunnel terminates TLS at the edge; cloudflared on this host
+    # connects OUTBOUND to Cloudflare, so we do NOT need 80/443 open to the
+    # internet. cloudflared talks to Caddy via 127.0.0.1:80 only.
+    # If you ever switch back to direct internet exposure, uncomment:
+    # ufw allow 80/tcp  comment 'http'
+    # ufw allow 443/tcp comment 'https'
+    :
 fi
 ufw --force enable
 

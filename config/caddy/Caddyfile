@@ -1,36 +1,40 @@
 # ──────────────────────────────────────────────────────────────────────────────
-#  PostHog reverse proxy — automatic TLS via Let's Encrypt
+#  PostHog reverse proxy — HTTP-only mode (TLS terminated by Cloudflare tunnel)
+#
+#  cloudflared on BM2 receives encrypted traffic from Cloudflare's edge,
+#  decrypts it, and forwards plain HTTP to this Caddy on localhost:80.
+#  We must NOT redirect to HTTPS or run our own ACME — Cloudflare does that.
 #
 #  Routes:
-#    /capture/*        → capture (high-volume event ingestion, Rust)
-#    /e/*, /batch/*    → capture (JS SDK uses these paths)
-#    /s/*              → capture (session recording snapshots)
-#    /minio/*          → MinIO console (admin only — protect at firewall)
-#    /*                → web (Django: API, app shell, dashboards)
+#    /minio/*    → MinIO console (admin only)
+#    /*          → web (Django: dashboard, API, capture endpoints)
 # ──────────────────────────────────────────────────────────────────────────────
 
 {
-    email {$ACME_EMAIL}
+    # Disable automatic HTTPS/ACME — Cloudflare provides the cert.
+    auto_https off
     servers {
+        # The X-Forwarded-* headers come from cloudflared (localhost / docker
+        # bridge ranges) — trust those so Caddy passes through Cloudflare's
+        # CF-Connecting-IP as the real client IP downstream.
         trusted_proxies static private_ranges
     }
 }
 
-{$DOMAIN} {
+# Plain HTTP on port 80 — cloudflared is the only thing that should reach this.
+:80 {
     encode zstd gzip
 
-    # Real client IP for capture rate-limiting / geoip
-    header X-Forwarded-Proto {scheme}
-    header X-Forwarded-Host {host}
+    # Use Cloudflare's real-client header if present.
+    request_header X-Forwarded-Proto https
+    request_header X-Forwarded-Host pg.xcelerator.in
 
-    # ── MinIO console (optional, restrict at firewall / basic auth) ─────────
+    # ── MinIO console (lock this down at Cloudflare Access if exposed) ──────
     handle_path /minio/* {
         reverse_proxy objectstorage:9001
     }
 
-    # ── All PostHog traffic → web (dashboard + capture endpoints) ───────────
-    #   /capture/*, /e, /batch, /s, /i/v0/e — capture
-    #   /api/*, /static/*, /, etc.          — dashboard / API
+    # ── Everything else → web (dashboard + capture endpoints) ───────────────
     handle {
         reverse_proxy web:8000 {
             health_uri /_health
