@@ -1,0 +1,66 @@
+<?xml version="1.0"?>
+<!--
+  ClickHouse overrides for PostHog on BM1 (i7-14700, 64GB DDR5).
+  Limits memory to ~24GB so the kernel keeps page cache headroom for queries.
+  See https://clickhouse.com/docs/en/operations/settings/settings for keys.
+-->
+<clickhouse>
+    <listen_host>0.0.0.0</listen_host>
+
+    <!-- Memory: cap server-wide at 24G; per-query 16G -->
+    <max_server_memory_usage>25769803776</max_server_memory_usage>
+    <max_memory_usage>17179869184</max_memory_usage>
+
+    <!-- 12 cores on a 20-core CPU leaves room for ingestion threads -->
+    <max_concurrent_queries>50</max_concurrent_queries>
+    <max_thread_pool_size>12000</max_thread_pool_size>
+
+    <!-- Background pools sized for sustained merges on NVMe -->
+    <background_pool_size>16</background_pool_size>
+    <background_merges_mutations_concurrency_ratio>2</background_merges_mutations_concurrency_ratio>
+    <background_move_pool_size>8</background_move_pool_size>
+    <background_schedule_pool_size>16</background_schedule_pool_size>
+
+    <!-- Smaller logs so they don't fill the volume -->
+    <logger>
+        <level>information</level>
+        <size>100M</size>
+        <count>5</count>
+    </logger>
+
+    <!-- Zookeeper for the single-shard cluster -->
+    <zookeeper>
+        <node>
+            <host>zookeeper</host>
+            <port>2181</port>
+        </node>
+    </zookeeper>
+
+    <!-- Path layout (Docker volume already mounted) -->
+    <path>/var/lib/clickhouse/</path>
+    <tmp_path>/var/lib/clickhouse/tmp/</tmp_path>
+    <user_files_path>/var/lib/clickhouse/user_files/</user_files_path>
+
+    <!--
+      Single-shard, single-replica "posthog" cluster.
+      PostHog migrations expect this cluster name to exist.
+    -->
+    <remote_servers>
+        <posthog>
+            <shard>
+                <internal_replication>true</internal_replication>
+                <replica>
+                    <host>clickhouse</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+        </posthog>
+    </remote_servers>
+
+    <!-- Macros consumed by ReplicatedMergeTree DDL -->
+    <macros>
+        <shard>01</shard>
+        <replica>posthog-bm1</replica>
+        <cluster>posthog</cluster>
+    </macros>
+</clickhouse>

@@ -1,0 +1,51 @@
+# ──────────────────────────────────────────────────────────────────────────────
+#  PostHog reverse proxy — automatic TLS via Let's Encrypt
+#
+#  Routes:
+#    /capture/*        → capture (high-volume event ingestion, Rust)
+#    /e/*, /batch/*    → capture (JS SDK uses these paths)
+#    /s/*              → capture (session recording snapshots)
+#    /minio/*          → MinIO console (admin only — protect at firewall)
+#    /*                → web (Django: API, app shell, dashboards)
+# ──────────────────────────────────────────────────────────────────────────────
+
+{
+    email {$ACME_EMAIL}
+    servers {
+        trusted_proxies static private_ranges
+    }
+}
+
+{$DOMAIN} {
+    encode zstd gzip
+
+    # Real client IP for capture rate-limiting / geoip
+    header X-Forwarded-Proto {scheme}
+    header X-Forwarded-Host {host}
+
+    # ── MinIO console (optional, restrict at firewall / basic auth) ─────────
+    handle_path /minio/* {
+        reverse_proxy objectstorage:9001
+    }
+
+    # ── All PostHog traffic → web (dashboard + capture endpoints) ───────────
+    #   /capture/*, /e, /batch, /s, /i/v0/e — capture
+    #   /api/*, /static/*, /, etc.          — dashboard / API
+    handle {
+        reverse_proxy web:8000 {
+            health_uri /_health
+            health_interval 30s
+            lb_policy least_conn
+            transport http {
+                keepalive 30s
+                response_header_timeout 120s
+            }
+        }
+    }
+
+    log {
+        output stdout
+        format json
+        level INFO
+    }
+}

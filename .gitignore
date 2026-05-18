@@ -1,0 +1,4 @@
+.env
+*.local
+*.swp
+.DS_Store
